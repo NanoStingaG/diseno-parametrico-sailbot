@@ -14,6 +14,7 @@ import {
 } from './water'
 import { brent, DEG, G as g, goldenMax, interp, KNOT } from './math'
 import type { Design } from './types'
+import { applyFixed } from './fixed'
 
 export interface Condition {
   V: number
@@ -57,12 +58,38 @@ export interface Analysis {
   sailCurves: { alpha: number; CL: number; CD: number; M: number; CLtail: number }[]
   tailCurve: { tail: number; alpha: number }[]
   capsize: { trimmed: number; feathered: number }
+  heelArms: HeelArms | null
   amaReserve: number
   warnings: { level: 'error' | 'warn' | 'info'; text: string }[]
   timings: Record<string, number>
 }
 
-interface Context {
+export interface HeelArmCase {
+  key: 'actual' | 'gust' | 'max' | 'feather'
+  label: string
+  /** brazo escorante (m) en cada escora de la curva */
+  arm: number[]
+  /** escora de equilibrio (°), null si vuelca */
+  phiEq: number | null
+  /** brazo adrizante restante máximo (m) y su escora */
+  residualMax: number
+  phiResidualMax: number
+  /** área entre GZ y el brazo escorante desde el equilibrio hasta el segundo corte (m·rad) */
+  area: number
+  /** segundo corte (ángulo límite) (°) */
+  phiLimit: number | null
+}
+
+export interface HeelArms {
+  phi: number[]
+  GZ: number[]
+  cases: HeelArmCase[]
+  gustFactor: number
+}
+
+export const GUST_FACTOR = 1.4
+
+export interface Context {
   d: Design
   boat: Boat
   hs: Hydrostatics
@@ -77,7 +104,7 @@ interface Context {
   deckZMast: number
 }
 
-function hullStatesAt(curve: StabilitySummary['curve'], phiSigned: number): HullState[] {
+export function hullStatesAt(curve: StabilitySummary['curve'], phiSigned: number): HullState[] {
   const phiDeg = Math.abs(phiSigned)
   const xs = curve.map((p) => p.phi)
   const n = curve[0].hulls.length
@@ -115,7 +142,7 @@ function heelForPos(ctx: Context, M: number): { phi: number; capsized: boolean }
   return { phi: ctx.phiGzMax * DEG, capsized: true }
 }
 
-function buildContext(d: Design, fast = false): { ctx: Context; up: ReturnType<Hydrostatics['equilibrium']>; stability: StabilitySummary; timings: Record<string, number> } {
+export function buildContext(d: Design, fast = false): { ctx: Context; up: ReturnType<Hydrostatics['equilibrium']>; stability: StabilitySummary; timings: Record<string, number> } {
   const timings: Record<string, number> = {}
   let t = performance.now()
   const boat = buildBoat(d)
@@ -130,7 +157,11 @@ function buildContext(d: Design, fast = false): { ctx: Context; up: ReturnType<H
   const deckZMast = boat.sailDeckZ
   const freeboard = Math.max(0.01, deckZMast - waterAt(d.sail.x))
   const zImage = d.numeric.imagePlane === 'sea' ? -freeboard : d.numeric.imagePlane === 'deck' ? 0 : null
-  const sail = new SailModel(d, zImage)
+  // en modo rápido (barridos y optimización) se usa una malla de vela más gruesa
+  const dSail = fast
+    ? { ...d, numeric: { ...d.numeric, sailSpan: d.numeric.sailSpan, sailChord: d.numeric.sailChord } }
+    : d
+  const sail = new SailModel(dSail, zImage)
   timings.vlm = performance.now() - t
   t = performance.now()
   const mainIm = up.im.hulls[0]
@@ -161,11 +192,11 @@ function buildContext(d: Design, fast = false): { ctx: Context; up: ReturnType<H
 }
 
 /** Equilibrio lateral y de escora a velocidad V. Devuelve la condición y el residuo longitudinal. */
-function solveAtSpeed(ctx: Context, V: number, mode: 'tail' | 'alpha', control: number, guess?: { lambda: number; phi: number; alpha: number }): Condition {
+export function solveAtSpeed(ctx: Context, V: number, mode: 'tail' | 'alpha', control: number, guess?: { lambda: number; phi: number; alpha: number }): Condition {
   const d = ctx.d
   let lambda = guess?.lambda ?? 0
   let phi = guess?.phi ?? 0
-  let alpha = guess?.alpha ?? (mode === 'alpha' ? control : control)
+  let alpha = guess?.alpha ?? (mode === 'alpha' ? control : 0)
   let sailF!: SailForces
   let tailStable = true
   let tailMargin = 0
@@ -179,10 +210,8 @@ function solveAtSpeed(ctx: Context, V: number, mode: 'tail' | 'alpha', control: 
   for (let it = 0; it < 40; it++) {
     const flow = apparentFlow(d.env, V, lambda, phi, ctx.freeboard)
     if (mode === 'tail') {
-      const eq = ctx.sail.tailEquilibrium(flow, control, phi, alpha)
+      const eq = ctx.sail.tailEquilibrium(flow, control, phi, alpha, false)
       alpha = eq.alpha
-      tailStable = eq.stable
-      tailMargin = eq.margin
       tailFound = eq.found
     } else alpha = control
     sailF = ctx.sail.evaluate(flow, alpha, mode === 'tail' ? control : 0, phi)
@@ -202,7 +231,13 @@ function solveAtSpeed(ctx: Context, V: number, mode: 'tail' | 'alpha', control: 
     const dp = hf.phi - phi
     lambda += 0.6 * dl
     phi += 0.6 * dp
-    if (Math.abs(dl) < 1e-5 && Math.abs(dp) < 1e-5) break
+    if (Math.abs(dl) < 1e-4 && Math.abs(dp) < 1e-4) break
+  }
+  if (mode === 'tail') {
+    const flow = apparentFlow(d.env, V, lambda, phi, ctx.freeboard)
+    const eq = ctx.sail.tailEquilibrium(flow, control, phi, alpha, true)
+    tailStable = eq.stable
+    tailMargin = eq.margin
   }
   const states = hullStatesAt(ctx.curve, phi / DEG)
   const res = resistance(ctx.boat, V, states, ctx.uprightStates, ctx.waves, side.Di)
@@ -241,7 +276,7 @@ function solveAtSpeed(ctx: Context, V: number, mode: 'tail' | 'alpha', control: 
   }
 }
 
-function solveSpeed(ctx: Context, mode: 'tail' | 'alpha', control: number): Condition {
+export function solveSpeed(ctx: Context, mode: 'tail' | 'alpha', control: number): Condition {
   let guess: { lambda: number; phi: number; alpha: number } | undefined
   const resid = (V: number) => {
     const c = solveAtSpeed(ctx, V, mode, control, guess)
@@ -258,7 +293,7 @@ function solveSpeed(ctx: Context, mode: 'tail' | 'alpha', control: number): Cond
   let Vhi = 1
   while (resid(Vhi) > 0 && Vhi < 8) Vhi *= 1.6
   guess = undefined
-  const V = brent(resid, Vmin, Vhi, 1e-4, 40)
+  const V = brent(resid, Vmin, Vhi, 1e-3, 40)
   return solveAtSpeed(ctx, V, mode, control, guess)
 }
 
@@ -278,8 +313,9 @@ function pitchCheck(ctx: Context, c: Condition) {
   return { theta: eq.theta / DEG, bowFreeboard, amaBowFreeboard }
 }
 
-export function analyze(d: Design, opts: { fast?: boolean; skipCurves?: boolean } = {}): Analysis {
+export function analyze(input: Design, opts: { fast?: boolean; skipCurves?: boolean } = {}): Analysis {
   const t0 = performance.now()
+  const d = applyFixed(input)
   const { ctx, up, stability, timings } = buildContext(d, opts.fast)
   let t = performance.now()
   let cond: Condition
@@ -308,6 +344,7 @@ export function analyze(d: Design, opts: { fast?: boolean; skipCurves?: boolean 
   }
   cond.pitch = pitchCheck(ctx, cond)
   timings.vpp = performance.now() - t
+  timings.vppEvals = ctx.sail.evalCount
   t = performance.now()
 
   // Curvas de la vela con el viento aparente de la solución
@@ -335,8 +372,10 @@ export function analyze(d: Design, opts: { fast?: boolean; skipCurves?: boolean 
   }
   timings.curves = performance.now() - t
 
-  // Viento de vuelco sin arrancada, viento de través: momento ∝ TWS²
+  // Viento de vuelco sin arrancada, viento de través
   const capsize = capsizeWind(ctx)
+  const heelArms = opts.skipCurves ? null : heelArmCurves(ctx, cond)
+  timings.heelArms = performance.now() - t
 
   // Reparto del empuje en adrizado
   const rho = d.env.rhoWater
@@ -368,12 +407,17 @@ export function analyze(d: Design, opts: { fast?: boolean; skipCurves?: boolean 
     sailCurves,
     tailCurve,
     capsize,
+    heelArms,
     amaReserve,
     warnings: [],
     timings,
   }
   analysis.warnings = warnings(analysis)
   timings.total = performance.now() - t0
+  timings.sailEvals = ctx.sail.evalCount
+  timings.sailIters = ctx.sail.iterCount
+  timings.eq = ctx.sail.eqCount
+  timings.brent = ctx.sail.brentCount
   return analysis
 }
 
@@ -382,50 +426,136 @@ export function analyze(d: Design, opts: { fast?: boolean; skipCurves?: boolean 
  * Trimada: la fuerza aerodinámica total máxima (sin pérdida) orientada de costado, el peor caso.
  * En bandera: α = 0, sólo resistencia de la vela, más la resistencia de cascos y equipos.
  */
-function capsizeWind(ctx: Context) {
+export function capsizeWind(ctx: Context) {
   const d = ctx.d
-  const env1 = { ...d.env, tws: 1, twa: 90 }
-  const flow = apparentFlow(env1, 0, 0, 0, ctx.freeboard)
   const zCLR = ctx.side.keel.zCP
-  let best = 0
-  let arm = 0
-  for (let a = 1; a <= 30; a += 1) {
-    const r = ctx.sail.evaluate(flow, a, 0, 0)
-    if (r.anyStall) break
-    const F = Math.hypot(r.Fx, r.Fy)
-    const M = F * (ctx.deckZMast + r.zCE - zCLR)
-    if (M > best) {
-      best = M
-      arm = ctx.deckZMast + r.zCE - zCLR
+  // Momento escorante a un viento U, sin arrancada y de través. Con polares que dependen de Re,
+  // el momento no escala exactamente con U²: se itera el viento de vuelco (punto fijo).
+  const moments = (U: number) => {
+    const env1 = { ...d.env, tws: U, twa: 90 }
+    const flow = apparentFlow(env1, 0, 0, 0, ctx.freeboard)
+    let best = 0
+    for (let a = 1; a <= 30; a += 1) {
+      const r = ctx.sail.evaluate(flow, a, 0, 0)
+      if (r.anyStall && a > 4) break
+      const F = Math.hypot(r.Fx, r.Fy)
+      const M = F * (ctx.deckZMast + r.zCE - zCLR)
+      if (M > best) best = M
+    }
+    const fw = flow(Math.max(0.05, d.windageZ - ctx.deckZMast))
+    const Mw = 0.5 * d.env.rhoAir * fw.U * fw.U * d.windageCdA * (d.windageZ - zCLR)
+    const r0 = ctx.sail.evaluate(flow, 0, 0, 0)
+    const Mf = Math.hypot(r0.Fx, r0.Fy) * (ctx.deckZMast + r0.zCE - zCLR) + Mw
+    return { trimmed: best + Mw, feathered: Mf }
+  }
+  const solve = (key: 'trimmed' | 'feathered') => {
+    let U = 10
+    for (let i = 0; i < 3; i++) {
+      const M = moments(U)[key]
+      if (!(M > 0)) return Infinity
+      const next = U * Math.sqrt(ctx.rmMax / M)
+      if (!Number.isFinite(next)) return Infinity
+      if (Math.abs(next - U) < 0.05 * U) return next
+      U = Math.min(Math.max(next, 0.5), 200)
+    }
+    return U
+  }
+  return { trimmed: solve('trimmed'), feathered: solve('feathered') }
+}
+
+/**
+ * Curvas de brazo escorante de la vela a cada escora: M_esc(φ)/(Δ·g), con la velocidad y la deriva de la solución.
+ * Casos: viento actual, racha (TWS × 1,4), vela al ángulo de máxima fuerza escorante y vela en bandera.
+ */
+export function heelArmCurves(ctx: Context, cond: Condition): HeelArms {
+  const d = ctx.d
+  const W = ctx.boat.mass * g
+  const zCLR = cond.side?.zCLR ?? ctx.side.keel.zCP
+  const phis = ctx.curve.map((p) => p.phi)
+  const GZ = ctx.curve.map((p) => p.GZ)
+  const tail = Number.isFinite(cond.tail) ? cond.tail : 0
+  const momentAt = (tws: number, alpha: number, tailDeg: number, phiDeg: number) => {
+    const env = { ...d.env, tws }
+    const phi = phiDeg * DEG
+    const flow = apparentFlow(env, cond.V, cond.lambda, phi, ctx.freeboard)
+    const r = ctx.sail.evaluate(flow, alpha, tailDeg, phi)
+    const fw = flow(Math.max(0.05, d.windageZ - ctx.deckZMast))
+    const Dw = 0.5 * d.env.rhoAir * fw.U * fw.U * d.windageCdA
+    const Fyw = Dw * Math.sin(fw.psi)
+    return r.Fy * (ctx.deckZMast + r.zCE - zCLR) + Fyw * (d.windageZ - zCLR)
+  }
+  // ángulo de máxima fuerza escorante a φ = 0
+  let aMax = cond.alpha
+  let mBest = -Infinity
+  for (let a = 0; a <= 30; a += 1.5) {
+    const m = momentAt(d.env.tws, a, 0, 0)
+    if (m > mBest) {
+      mBest = m
+      aMax = a
     }
   }
-  void arm
-  const fw = flow(Math.max(0.05, d.windageZ - ctx.deckZMast))
-  const Mw = 0.5 * d.env.rhoAir * fw.U * fw.U * d.windageCdA * (d.windageZ - zCLR)
-  const r0 = ctx.sail.evaluate(flow, 0, 0, 0)
-  const Mfeather = Math.hypot(r0.Fx, r0.Fy) * (ctx.deckZMast + r0.zCE - zCLR) + Mw
-  return {
-    trimmed: best + Mw > 0 ? Math.sqrt(ctx.rmMax / (best + Mw)) : Infinity,
-    feathered: Mfeather > 0 ? Math.sqrt(ctx.rmMax / Mfeather) : Infinity,
-  }
+  const defs: { key: HeelArmCase['key']; label: string; tws: number; alpha: number; tail: number }[] = [
+    { key: 'actual', label: `Viento actual (${d.env.tws.toFixed(1)} m/s)`, tws: d.env.tws, alpha: cond.alpha, tail },
+    { key: 'gust', label: `Racha ×${GUST_FACTOR} (${(d.env.tws * GUST_FACTOR).toFixed(1)} m/s)`, tws: d.env.tws * GUST_FACTOR, alpha: cond.alpha, tail },
+    { key: 'max', label: `Vela a máxima fuerza (α = ${aMax.toFixed(1)}°)`, tws: d.env.tws, alpha: aMax, tail: 0 },
+    { key: 'feather', label: 'Vela en bandera (α = 0°)', tws: d.env.tws, alpha: 0, tail: 0 },
+  ]
+  const cases: HeelArmCase[] = defs.map((c) => {
+    const arm = phis.map((p) => Math.max(0, momentAt(c.tws, c.alpha, c.tail, p)) / W)
+    const res = phis.map((_, i) => GZ[i] - arm[i])
+    // equilibrio: primer paso de negativo a positivo
+    let phiEq: number | null = null
+    let iEq = -1
+    if (res[0] >= 0) {
+      phiEq = 0
+      iEq = 0
+    } else {
+      for (let i = 1; i < res.length; i++) {
+        if (res[i - 1] < 0 && res[i] >= 0) {
+          const t = -res[i - 1] / (res[i] - res[i - 1])
+          phiEq = phis[i - 1] + t * (phis[i] - phis[i - 1])
+          iEq = i
+          break
+        }
+      }
+    }
+    let residualMax = 0
+    let phiResidualMax = 0
+    let area = 0
+    let phiLimit: number | null = null
+    if (iEq >= 0 && phiEq !== null) {
+      for (let i = iEq; i < res.length; i++) {
+        if (res[i] > residualMax) {
+          residualMax = res[i]
+          phiResidualMax = phis[i]
+        }
+        if (i > iEq) {
+          if (res[i] < 0) {
+            const t = res[i - 1] / (res[i - 1] - res[i])
+            phiLimit = phis[i - 1] + t * (phis[i] - phis[i - 1])
+            area += 0.5 * res[i - 1] * (phiLimit - phis[i - 1]) * DEG
+            break
+          }
+          const p0 = i === iEq ? phiEq : phis[i - 1]
+          area += 0.5 * (Math.max(res[i - 1], 0) + res[i]) * (phis[i] - p0) * DEG
+        }
+      }
+    }
+    return { key: c.key, label: c.label, arm, phiEq, residualMax, phiResidualMax, area, phiLimit }
+  })
+  return { phi: phis, GZ, cases, gustFactor: GUST_FACTOR }
 }
 
 function warnings(a: Analysis): Analysis['warnings'] {
   const d = a.boat.design
   const w: Analysis['warnings'] = []
   const c = a.condition
-  if (a.boat.loa.aligned > d.limits.loaMax + 1e-9)
-    w.push({ level: 'error', text: `Eslora total ${a.boat.loa.aligned.toFixed(2)} m con la vela a crujía: supera el límite de ${d.limits.loaMax.toFixed(2)} m` })
-  if (a.boat.loa.rotating > d.limits.loaMax + 1e-9)
-    w.push({ level: 'info', text: `Al girar, la vela y la cola barren una envolvente de ${a.boat.loa.rotating.toFixed(2)} m de eslora` })
   if (c.capsized) w.push({ level: 'error', text: `El momento escorante supera el adrizante máximo: vuelco con ${d.env.tws.toFixed(1)} m/s de viento` })
   if (c.noProgress) w.push({ level: 'warn', text: 'La vela no vence la resistencia: el barco no avanza en esta condición' })
-  else if (c.V / KNOT < d.limits.minSpeedKn)
-    w.push({ level: 'warn', text: `Velocidad ${(c.V / KNOT).toFixed(2)} nudos, por debajo del mínimo de ${d.limits.minSpeedKn} nudos` })
   if (Math.abs(c.phi) / DEG > d.limits.maxHeelWarn) w.push({ level: 'warn', text: `Escora de ${(c.phi / DEG).toFixed(1)}°, por encima de ${d.limits.maxHeelWarn}°` })
   if (c.sail.anyStall) {
     const n = c.sail.strips.filter((s) => s.surface === 0 && s.stalled).length
-    w.push({ level: 'warn', text: `Vela en pérdida en ${n} franjas: el modelo lineal sobrestima la fuerza` })
+    w.push({ level: 'warn', text: `Vela en pérdida en ${n} franjas (más allá del CL máximo de la polar)` })
   }
   const fn = c.V / Math.sqrt(9.81 * Math.max(d.hull.L, 0.1))
   if (fn > 0.5) w.push({ level: 'warn', text: `Froude ${fn.toFixed(2)}: fuera del rango de validez del modelo de resistencia (Fn > 0,5)` })

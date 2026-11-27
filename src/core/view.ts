@@ -38,6 +38,7 @@ export interface AnalysisView {
   sailCurves: Analysis['sailCurves']
   tailCurve: Analysis['tailCurve']
   capsize: Analysis['capsize']
+  heelArms: Analysis['heelArms']
   amaReserve: number
   warnings: Analysis['warnings']
   timings: Record<string, number>
@@ -64,7 +65,6 @@ export const METRICS: { key: string; label: string; unit: string }[] = [
   { key: 'freeboard', label: 'Francobordo del casco central', unit: 'm' },
   { key: 'loa', label: 'Eslora total (vela a crujía)', unit: 'm' },
   { key: 'tailMargin', label: 'Margen de estabilidad vela-cola', unit: '% c' },
-  { key: 'routeHours', label: 'Tiempo de ruta a esta velocidad', unit: 'h' },
 ]
 
 function hullView(h: Analysis['boat']['main']): HullView {
@@ -125,7 +125,6 @@ export function toView(a: Analysis): AnalysisView {
     freeboard: a.upright.freeboardMain,
     loa: b.loa.aligned,
     tailMargin: c.tailMargin,
-    routeHours: c.V > 1e-6 ? (d.env.route * 1852) / c.V / 3600 : Infinity,
   }
   return {
     design: d,
@@ -147,6 +146,7 @@ export function toView(a: Analysis): AnalysisView {
     sailCurves: a.sailCurves,
     tailCurve: a.tailCurve,
     capsize: a.capsize,
+    heelArms: a.heelArms,
     amaReserve: a.amaReserve,
     warnings: a.warnings,
     timings: a.timings,

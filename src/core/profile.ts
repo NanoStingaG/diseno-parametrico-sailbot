@@ -47,18 +47,20 @@ export function parseSelig(text: string): { name: string; points: { x: number; y
 }
 
 /** Lee una polar en CSV o en el formato de salida de XFOIL: columnas alfa (grados), cl, cd. */
-export function parsePolarCsv(text: string): Polar2D | null {
+export function parsePolarCsv(text: string, fileName = ''): Polar2D | null {
   const lines = text.split(/\r?\n/)
-  const pts: { alpha: number; cl: number; cd: number }[] = []
+  const pts: { alpha: number; cl: number; cd: number; cm?: number }[] = []
   let iA = 0
   let iCl = 1
   let iCd = 2
+  let iCm = -1
   let re: number | undefined
   for (const raw of lines) {
     const l = raw.trim()
     if (!l) continue
-    const mRe = l.match(/Re\s*=\s*([\d.]+)\s*e\s*([\d]+)/i)
-    if (mRe) re = Number(mRe[1]) * 10 ** Number(mRe[2])
+    // XFOIL: "Re =     0.050 e 6"; otros: "Re = 50000", "Re=5e4"
+    const mRe = l.match(/Re\s*=\s*([\d.]+)\s*e\s*\+?(\d+)/i) ?? l.match(/Re\s*=\s*([\d.]+(?:e[+-]?\d+)?)/i)
+    if (mRe && re === undefined) re = mRe[2] !== undefined ? Number(mRe[1]) * 10 ** Number(mRe[2]) : Number(mRe[1])
     const cols = l.split(/[\s,;]+/)
     const lower = cols.map((c) => c.toLowerCase())
     if (lower.includes('cl') && lower.includes('cd')) {
@@ -66,14 +68,21 @@ export function parsePolarCsv(text: string): Polar2D | null {
       if (iA < 0) iA = 0
       iCl = lower.indexOf('cl')
       iCd = lower.indexOf('cd')
+      iCm = lower.indexOf('cm')
       continue
     }
     const nums = cols.map((c) => Number(c.replace(',', '.')))
     if (nums.length > Math.max(iA, iCl, iCd) && [nums[iA], nums[iCl], nums[iCd]].every(Number.isFinite)) {
-      pts.push({ alpha: nums[iA], cl: nums[iCl], cd: nums[iCd] })
+      const cm = iCm >= 0 && Number.isFinite(nums[iCm]) ? nums[iCm] : undefined
+      pts.push({ alpha: nums[iA], cl: nums[iCl], cd: nums[iCd], ...(cm !== undefined ? { cm } : {}) })
     }
   }
   if (pts.length < 3) return null
+  if (re === undefined) {
+    // Reynolds en el nombre del fichero: "..._Re50000.csv", "re_5e4"
+    const m = fileName.match(/re[_\-=]?([\d.]+(?:e[+-]?\d+)?)(k)?/i)
+    if (m) re = Number(m[1]) * (m[2] ? 1000 : 1)
+  }
   pts.sort((a, b) => a.alpha - b.alpha)
-  return { points: pts, reynolds: re }
+  return { points: pts, reynolds: re, name: fileName || undefined }
 }

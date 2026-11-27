@@ -1,5 +1,6 @@
 import type { AnalysisView } from '../core/view'
 import { DEG, KNOT } from '../core/math'
+import { tailMarginText } from './Charts'
 
 function Stat({ label, value, unit, sub }: { label: string; value: string; unit?: string; sub?: string }) {
   return (
@@ -16,7 +17,7 @@ function Stat({ label, value, unit, sub }: { label: string; value: string; unit?
 
 const f = (x: number, d = 2) => (Number.isFinite(x) ? x.toFixed(d) : '—')
 
-export function Results({ v, busy }: { v: AnalysisView | null; busy: boolean }) {
+export function Results({ v, busy, compact }: { v: AnalysisView | null; busy: boolean; compact?: boolean }) {
   if (!v) return <div className="results">{busy ? 'Calculando…' : 'Sin resultados'}</div>
   const c = v.condition
   const d = v.design
@@ -38,8 +39,10 @@ export function Results({ v, busy }: { v: AnalysisView | null; busy: boolean }) 
         <Stat label="Deriva" value={f(c.lambda / DEG, 1)} unit="°" />
         <Stat label="Ángulo de ataque" value={f(c.alpha, 1)} unit="°" sub={d.control.mode === 'alpha' ? 'impuesto' : `cola ${f(c.tail, 1)}°`} />
         <Stat label="Viento aparente" value={f(c.aws)} unit="m/s" sub={`${f(c.awa, 0)}° desde proa`} />
-        <Stat label="Tiempo de ruta" value={f(v.metrics.routeHours, 1)} unit="h" sub={`${d.env.route} MN`} />
+        <Stat label="Margen vela-cola" value={tailMarginText(c, d.control.mode)} />
       </div>
+      {!compact && (
+        <>
       <h3>Fuerzas</h3>
       <div className="stats">
         <Stat label="Propulsión" value={f(c.drive, 2)} unit="N" />
@@ -47,6 +50,8 @@ export function Results({ v, busy }: { v: AnalysisView | null; busy: boolean }) 
         <Stat label="Fuerza lateral vela" value={f(c.sail.Fy, 2)} unit="N" />
         <Stat label="Momento escorante" value={f(c.heelMoment, 2)} unit="N·m" />
       </div>
+        </>
+      )}
       <h3>Estabilidad y flotación</h3>
       <div className="stats">
         <Stat label="Desplazamiento" value={f(v.mass, 2)} unit="kg" />

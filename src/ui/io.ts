@@ -13,7 +13,19 @@ function merge<T>(base: T, over: unknown): T {
 
 /** Completa un diseño cargado con los valores por defecto (compatibilidad entre versiones). */
 export function normalizeDesign(raw: unknown): Design {
-  return merge(defaultDesign(), raw)
+  const r = raw && typeof raw === 'object' ? { ...(raw as Record<string, unknown>) } : {}
+  // v1: una sola polar en «sailPolar»; v2: varias polares por Reynolds en «sailPolars»
+  if (r.sailPolar && !r.sailPolars) r.sailPolars = [r.sailPolar]
+  delete r.sailPolar
+  if (r.env && typeof r.env === 'object') {
+    const env = { ...(r.env as Record<string, unknown>) }
+    delete env.route
+    r.env = env
+  }
+  delete r.limits
+  const d = merge(defaultDesign(), r)
+  if (!Array.isArray(d.sailPolars) || d.sailPolars.length === 0) delete d.sailPolars
+  return d
 }
 
 export function encodeDesign(d: Design): string {

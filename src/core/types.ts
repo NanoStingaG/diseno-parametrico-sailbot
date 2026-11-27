@@ -144,8 +144,6 @@ export interface EnvParams {
   rhoWater: number
   nuAir: number
   nuWater: number
-  /** Distancia de la ruta (MN) */
-  route: number
 }
 
 export interface ControlParams {
@@ -158,6 +156,8 @@ export interface ControlParams {
   maxAmaImmersion: number
 }
 
+export type PolarSource = 'auto' | 'panel'
+
 export interface NumericParams {
   sailSpan: number
   sailChord: number
@@ -165,17 +165,26 @@ export interface NumericParams {
   tailChord: number
   sections: number
   imagePlane: ImagePlane
+  /** Origen de las polares 2D: automático (cargadas > tabla XFOIL > paneles) o siempre paneles 2D */
+  polarSource: PolarSource
+  /** Paneles del perfil 2D */
+  foilPanels: number
+  /** Criterio de transición eⁿ */
+  ncrit: number
+  /** Iteraciones del acoplamiento viscoso del perfil 2D */
+  couplingIter: number
+  /** Iteraciones máximas del VLM no lineal */
+  vlmIter: number
 }
 
 export interface Polar2D {
-  /** Puntos (alpha grados, cl, cd) */
-  points: { alpha: number; cl: number; cd: number }[]
+  /** Puntos (alpha grados, cl, cd, cm) */
+  points: { alpha: number; cl: number; cd: number; cm?: number }[]
   reynolds?: number
+  name?: string
 }
 
 export interface LimitParams {
-  loaMax: number
-  minSpeedKn: number
   /** Umbral de aviso de reserva de flotabilidad del patín (% del desplazamiento) */
   amaReserveMin: number
   maxHeelWarn: number
@@ -201,7 +210,8 @@ export interface Design {
   windageCdA: number
   /** Altura del centro de la resistencia aerodinámica de cascos sobre la línea base (m) */
   windageZ: number
-  sailPolar?: Polar2D
+  /** Polares 2D cargadas de la vela (una por Reynolds) */
+  sailPolars?: Polar2D[]
   /** Coordenadas del perfil cargado (para dibujarlo) */
   sailProfile?: { x: number; y: number }[]
 }

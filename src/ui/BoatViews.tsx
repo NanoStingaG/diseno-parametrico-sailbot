@@ -83,6 +83,73 @@ function Svg({ f, title, children }: { f: Frame; title: string; children: ReactN
   )
 }
 
+export interface MassDot {
+  name: string
+  mass: number
+  x: number
+  y: number
+  z: number
+  auto?: boolean
+}
+
+/** Puntos de masa con área proporcional al peso, y el CG total. u, v: coordenadas en la vista. */
+function MassDots({ f, items, uv, G }: { f: Frame; items: MassDot[]; uv: (m: { x: number; y: number; z: number }) => [number, number]; G: [number, number] }) {
+  const mMax = Math.max(...items.map((m) => m.mass), 1e-6)
+  // etiquetas sin solaparse: se colocan por orden de masa, a la derecha o a la izquierda; si no caben, sólo queda el punto (con su tooltip)
+  const placed: { x0: number; x1: number; y0: number; y1: number }[] = [{ x0: sx(f, G[0]) - 9, x1: sx(f, G[0]) + 30, y0: sy(f, G[1]) - 20, y1: sy(f, G[1]) + 8 }]
+  const order = items.map((_, i) => i).sort((a, b) => items[b].mass - items[a].mass)
+  const labels = new Map<number, { x: number; y: number; anchor: 'start' | 'end' }>()
+  for (const i of order) {
+    const m = items[i]
+    const [u, v] = uv(m)
+    const r = 3 + 11 * Math.sqrt(Math.max(m.mass, 0) / mMax)
+    const w = (m.name.length + 6) * 5.6
+    const cx = sx(f, u)
+    const cy = sy(f, v)
+    for (const side of [1, -1] as const) {
+      const box = side > 0 ? { x0: cx + r + 2, x1: cx + r + 2 + w } : { x0: cx - r - 2 - w, x1: cx - r - 2 }
+      const b = { ...box, y0: cy - 6, y1: cy + 6 }
+      if (b.x0 < 0 || b.x1 > f.W) continue
+      if (placed.some((p) => p.x0 < b.x1 && b.x0 < p.x1 && p.y0 < b.y1 && b.y0 < p.y1)) continue
+      placed.push(b)
+      labels.set(i, { x: side > 0 ? box.x0 : box.x1, y: cy + 3, anchor: side > 0 ? 'start' : 'end' })
+      break
+    }
+  }
+  return (
+    <g>
+      {order
+        .slice()
+        .reverse()
+        .map((i) => {
+          const m = items[i]
+          const [u, v] = uv(m)
+          const r = 3 + 11 * Math.sqrt(Math.max(m.mass, 0) / mMax)
+          const l = labels.get(i)
+          return (
+            <g key={i}>
+              <circle cx={sx(f, u)} cy={sy(f, v)} r={r} fill={m.auto ? '#f47230' : '#257de0'} fillOpacity={0.3} stroke={m.auto ? '#c65d21' : '#1757ac'} strokeWidth={1.2}>
+                <title>{`${m.name}: ${m.mass.toFixed(2)} kg (x ${m.x.toFixed(2)}, y ${m.y.toFixed(2)}, z ${m.z.toFixed(2)} m)`}</title>
+              </circle>
+              {l && (
+                <text x={l.x} y={l.y} fontSize={10} fill="#334e68" textAnchor={l.anchor} stroke="#fff" strokeWidth={3} paintOrder="stroke">
+                  {m.name} · {m.mass.toFixed(2)}
+                </text>
+              )}
+            </g>
+          )
+        })}
+      <g>
+        <circle cx={sx(f, G[0])} cy={sy(f, G[1])} r={7} fill="#fff" stroke="#102a43" strokeWidth={2} />
+        <path d={`M${sx(f, G[0]) - 7},${sy(f, G[1])} h14 M${sx(f, G[0])},${sy(f, G[1]) - 7} v14`} stroke="#102a43" strokeWidth={1.5} />
+        <text x={sx(f, G[0]) + 9} y={sy(f, G[1]) - 8} fontSize={11} fontWeight={600} fill="#102a43">
+          CG
+        </text>
+      </g>
+    </g>
+  )
+}
+
 function forceScale(v: AnalysisView, worldSize: number) {
   const c = v.condition
   const m = Math.max(Math.hypot(c.sail.Fx, c.sail.Fy), Math.abs(c.side.F), Math.abs(c.drive), 1e-6)
@@ -90,12 +157,12 @@ function forceScale(v: AnalysisView, worldSize: number) {
 }
 
 /** Vista en planta: proa a la derecha, estribor abajo. */
-export function PlanView({ v }: { v: AnalysisView }) {
+export function PlanView({ v, masses }: { v: AnalysisView; masses?: MassDot[] }) {
   const d = v.design
   const c = v.condition
   const yMax = d.ama.y + Math.max(...v.hulls[2].B) / 2 + 0.25
   const xMin = Math.min(v.loa.xMinRot, v.loa.xMin) - 0.3
-  const xMax = Math.max(v.loa.xMaxRot, v.loa.xMin + d.limits.loaMax) + 0.3
+  const xMax = Math.max(v.loa.xMaxRot, v.loa.xMax) + 0.9
   const f = makeFrame(xMin, xMax, -yMax, yMax, 560)
   const P = (x: number, y: number): [number, number] => [x, -y]
   const hullPoly = (h: AnalysisView['hulls'][number]) => {
@@ -127,13 +194,8 @@ export function PlanView({ v }: { v: AnalysisView }) {
   const windLen = 0.5
   const wx0 = xMax - 0.75
   const wy0 = yMax * 0.25
-  const loaStart = v.loa.xMin
   return (
-    <Svg f={f} title="Planta (proa a la derecha, estribor abajo)">
-      <rect x={sx(f, loaStart)} y={sy(f, yMax - 0.05)} width={d.limits.loaMax * f.k} height={(2 * yMax - 0.1) * f.k} fill="none" stroke={v.loa.aligned > d.limits.loaMax ? COLORS.force : COLORS.grid} strokeDasharray="6 4" />
-      <text x={sx(f, loaStart) + 4} y={sy(f, yMax - 0.05) + 12} fontSize={10} fill="#7b8794">
-        Límite de eslora {d.limits.loaMax.toFixed(2)} m
-      </text>
+    <Svg f={f} title={masses ? 'Planta: partidas de peso (proa a la derecha, estribor abajo)' : 'Planta (proa a la derecha, estribor abajo)'}>
       <circle cx={sx(f, d.sail.x)} cy={sy(f, 0)} r={(v.loa.xMaxRot - v.loa.xMinRot > 0 ? Math.max(d.tail.arm + 0.75 * d.tail.chord, (1 - d.sail.pivot) * cr) : 0) * f.k} fill="none" stroke={COLORS.grid} strokeDasharray="2 4" />
       {beamXs.map((bx, i) => (
         <line key={i} x1={sx(f, bx)} y1={sy(f, d.ama.y)} x2={sx(f, bx)} y2={sy(f, -d.ama.y)} stroke={COLORS.hull} strokeWidth={4} strokeLinecap="round" opacity={0.6} />
@@ -145,11 +207,17 @@ export function PlanView({ v }: { v: AnalysisView }) {
       <line x1={sx(f, d.sail.x)} y1={sy(f, 0)} x2={sx(f, tailPivot[0])} y2={sy(f, -tailPivot[1])} stroke={COLORS.sail} strokeWidth={1.5} />
       <polygon points={pts(f, tailPts)} fill="#fbe3d1" stroke={COLORS.tail} strokeWidth={1.5} />
       <circle cx={sx(f, d.sail.x)} cy={sy(f, 0)} r={3} fill={COLORS.sail} />
-      <Arrow f={f} x={c.xCE} y={0} dx={c.sail.Fx * k} dy={-c.sail.Fy * k} color={COLORS.force} label={`Vela ${Math.hypot(c.sail.Fx, c.sail.Fy).toFixed(2)} N`} />
-      <Arrow f={f} x={c.xCE} y={0} dx={c.drive * k} dy={0} color={COLORS.force} width={1} label={`Propulsión ${c.drive.toFixed(2)} N`} />
-      <Arrow f={f} x={c.side.xCLR} y={0} dx={0} dy={c.side.F * k} color={COLORS.hydro} label={`Agua ${c.side.F.toFixed(2)} N`} />
-      <Arrow f={f} x={wx0 + windLen * Math.cos(twa)} y={wy0 + windLen * Math.sin(twa)} dx={-windLen * Math.cos(twa)} dy={-windLen * Math.sin(twa)} color={COLORS.wind} label="Viento real" />
-      <Dot f={f} x={v.G.x} y={-v.G.y} color={COLORS.hull} label="G" />
+      {masses ? (
+        <MassDots f={f} items={masses} uv={(m) => [m.x, -m.y]} G={[v.G.x, -v.G.y]} />
+      ) : (
+        <>
+          <Arrow f={f} x={c.xCE} y={0} dx={c.sail.Fx * k} dy={-c.sail.Fy * k} color={COLORS.force} label={`Vela ${Math.hypot(c.sail.Fx, c.sail.Fy).toFixed(2)} N`} />
+          <Arrow f={f} x={c.xCE} y={0} dx={c.drive * k} dy={0} color={COLORS.force} width={1} label={`Propulsión ${c.drive.toFixed(2)} N`} />
+          <Arrow f={f} x={c.side.xCLR} y={0} dx={0} dy={c.side.F * k} color={COLORS.hydro} label={`Agua ${c.side.F.toFixed(2)} N`} />
+          <Arrow f={f} x={wx0 + windLen * Math.cos(twa)} y={wy0 + windLen * Math.sin(twa)} dx={-windLen * Math.cos(twa)} dy={-windLen * Math.sin(twa)} color={COLORS.wind} label="Viento real" />
+          <Dot f={f} x={v.G.x} y={-v.G.y} color={COLORS.hull} label="G" />
+        </>
+      )}
     </Svg>
   )
 }
@@ -213,7 +281,7 @@ export function SectionView({ v }: { v: AnalysisView }) {
 }
 
 /** Perfil: proa a la derecha. */
-export function ProfileView({ v }: { v: AnalysisView }) {
+export function ProfileView({ v, masses }: { v: AnalysisView; masses?: MassDot[] }) {
   const d = v.design
   const c = v.condition
   const zTop = v.sailDeckZ + d.sail.gap + Math.max(d.sail.height, d.tail.height + d.tail.span) + 0.1
@@ -253,7 +321,7 @@ export function ProfileView({ v }: { v: AnalysisView }) {
   ])
   const h = v.upright.h
   return (
-    <Svg f={f} title="Perfil (proa a la derecha), vela alineada a crujía">
+    <Svg f={f} title={masses ? 'Perfil: partidas de peso, área de cada punto proporcional a su masa (kg)' : 'Perfil (proa a la derecha), vela alineada a crujía'}>
       <rect x={0} y={sy(f, h)} width={f.W} height={f.H - sy(f, h)} fill="#d9ecfa" opacity={0.6} />
       <line x1={0} y1={sy(f, h)} x2={f.W} y2={sy(f, h)} stroke={COLORS.water} strokeWidth={1.5} />
       <polygon points={outline(ama)} fill="none" stroke={COLORS.hull} strokeDasharray="5 3" />
@@ -265,9 +333,15 @@ export function ProfileView({ v }: { v: AnalysisView }) {
       <line x1={sx(f, s.x)} y1={sy(f, deck + t.height + t.span / 2)} x2={sx(f, tl - t.chord / 2)} y2={sy(f, deck + t.height + t.span / 2)} stroke={COLORS.sail} />
       <polygon points={tail} fill="#fbe3d1" stroke={COLORS.tail} />
       <line x1={sx(f, s.x)} y1={sy(f, v.sailDeckZ)} x2={sx(f, s.x)} y2={sy(f, deck + s.height)} stroke={COLORS.sail} strokeDasharray="3 3" />
-      <Dot f={f} x={s.x} y={c.zCE} color={COLORS.force} label="CE" />
-      <Dot f={f} x={c.side.xCLR} y={c.side.zCLR} color={COLORS.hydro} label="CLR" />
-      <Dot f={f} x={v.G.x} y={v.G.z} color={COLORS.hull} label="G" />
+      {masses ? (
+        <MassDots f={f} items={masses} uv={(m) => [m.x, m.z]} G={[v.G.x, v.G.z]} />
+      ) : (
+        <>
+          <Dot f={f} x={s.x} y={c.zCE} color={COLORS.force} label="CE" />
+          <Dot f={f} x={c.side.xCLR} y={c.side.zCLR} color={COLORS.hydro} label="CLR" />
+          <Dot f={f} x={v.G.x} y={v.G.z} color={COLORS.hull} label="G" />
+        </>
+      )}
       <text x={8} y={16} fontSize={11} fill="#52606d">
         Eslora total {v.loa.aligned.toFixed(2)} m · calado máximo {(h - Math.min(v.keel.tipZ - (v.bulb.enabled ? v.bulb.diameter / 2 : 0), v.rudder.tipZ)).toFixed(2)} m
       </text>
